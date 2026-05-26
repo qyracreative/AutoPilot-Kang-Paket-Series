@@ -192,17 +192,18 @@ export default function App() {
 
   const jakartaTime = formatJakartaTime(currentTime);
 
-  // --- Autopilot States ---
-  const [gasUrl, setGasUrl] = useState(localStorage.getItem('gas_url') || "");
+  // --- Autopilot Config -- Uses Environment Variable or Fallback saved URL ---
+  const gasUrl = (((import.meta as any).env?.VITE_APPS_SCRIPT_URL) || localStorage.getItem('gas_url') || "").trim();
   const [gasCopied, setGasCopied] = useState(false);
   const [isAutopilotActive, setIsAutopilotActive] = useState(localStorage.getItem('autopilot_active') === 'true');
   const [autopilotStatus, setAutopilotStatus] = useState("Idle");
   const [countdown, setCountdown] = useState(0);
   const [currentQueueItem, setCurrentQueueItem] = useState<any>(null);
+  const sheetName = 'Series';
 
   useEffect(() => {
-    localStorage.setItem('gas_url', gasUrl);
-  }, [gasUrl]);
+    localStorage.setItem('gas_sheet_name', 'Series');
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('autopilot_active', isAutopilotActive.toString());
@@ -217,21 +218,38 @@ export default function App() {
       return null;
     }
     
-    if (!trimmedUrl.includes("/exec")) {
+    // Clean URL from any existing query parameters to prevent duplicates
+    const cleanUrl = trimmedUrl.split('?')[0].trim();
+    
+    if (!cleanUrl.includes("/exec")) {
       setAutopilotStatus("URL Salah (Harus /exec)");
       return null;
     }
 
     try {
       setAutopilotStatus("Mencari antrian...");
-      const res = await fetch(`${trimmedUrl}?action=getQueue`, {
+      const res = await fetch(`${cleanUrl}?action=getQueue&sheet=${encodeURIComponent(sheetName)}`, {
         method: "GET",
         mode: "cors",
       });
       
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       
-      const item = await res.json();
+      const text = await res.text();
+      let item;
+      try {
+        item = JSON.parse(text);
+      } catch (jsonErr) {
+        if (text.trim().startsWith("Error:") || text.trim().startsWith("Exception:") || text.trim().startsWith("TypeError:")) {
+          throw new Error(text.trim());
+        }
+        throw new Error("Respons dari Google Apps Script bukan JSON yang valid. Pastikan Web App Anda di-deploy dengan benar.");
+      }
+
+      if (item && item.error) {
+        throw new Error(item.error);
+      }
+
       if (item && item.rowIndex) {
         setCurrentQueueItem(item);
         setCourier(item.courier);
@@ -255,10 +273,10 @@ export default function App() {
   const updateStatus = async (status: string, rowIndex: number) => {
     const trimmedUrl = gasUrl.trim();
     if (!trimmedUrl) return;
+    const cleanUrl = trimmedUrl.split('?')[0].trim();
     try {
-      const timestamp = new Date().getTime();
-      // Use GET for status updates with cache buster
-      await fetch(`${trimmedUrl}?action=updateStatus&status=${status}&rowIndex=${rowIndex}&cb=${timestamp}`, {
+      // Send as GET with query parameters per Apps Script doGet e.parameter expectations
+      await fetch(`${cleanUrl}?action=updateStatus&sheet=${encodeURIComponent(sheetName)}&status=${encodeURIComponent(status)}&rowIndex=${rowIndex}`, {
         method: "GET",
         mode: "no-cors"
       });
@@ -271,6 +289,7 @@ export default function App() {
   const uploadResults = async (prompt: GeneratedPrompt, rowIndex: number) => {
     const trimmedUrl = gasUrl.trim();
     if (!trimmedUrl) return;
+    const cleanUrl = trimmedUrl.split('?')[0].trim();
 
     const fbHashtags = (prompt.socialMedia.facebook.hashtags || []).map(h => h.startsWith('#') ? h : '#' + h).join(' ');
     const fbContent = `${prompt.socialMedia.facebook.title || ""}\n\n${prompt.socialMedia.facebook.description || ""}\n\n${fbHashtags}`;
@@ -283,9 +302,9 @@ export default function App() {
     const fullPromptText = getFullPromptText(prompt);
 
     try {
-      // Create a plain object for the payload
-      // GAS e.parameter works best with application/x-www-form-urlencoded
+      // Use URLSearchParams for application/x-www-form-urlencoded to populate e.parameter in doPost
       const body = new URLSearchParams();
+      body.append("sheet", sheetName);
       body.append("action", "updateResults");
       body.append("rowIndex", rowIndex.toString());
       body.append("fullPrompt", fullPromptText);
@@ -295,11 +314,13 @@ export default function App() {
       body.append("ytHashtags", ytHashtags);
       body.append("tiktok", ttContent);
 
-      // We send it to doPost (via method: POST)
-      await fetch(trimmedUrl, {
+      await fetch(`${cleanUrl}?sheet=${encodeURIComponent(sheetName)}&action=updateResults`, {
         method: "POST",
         mode: "no-cors",
-        body: body
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: body.toString()
       });
       
       console.log("Upload results requested for row:", rowIndex);
@@ -959,145 +980,52 @@ export default function App() {
 
           {/* Autopilot Section */}
           <div className="mt-8 pt-6 border-t border-[#FFFFFF10] space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-orange-500" />
-                <h3 className="text-xs font-bold tracking-widest text-[#8E9299] uppercase">Autopilot Control</h3>
-              </div>
-              <div className="flex items-center gap-2">
-                <Button 
-                  variant="ghost" 
-                  size="sm" 
-                  onClick={() => {
-                    setCourier(DEFAULT_COURIER);
-                    setRecipient(DEFAULT_RECIPIENT);
-                    setEnv(DEFAULT_ENV);
-                  }}
-                  className="text-[#8E9299] hover:text-white hover:bg-[#FFFFFF08] text-[10px] font-mono uppercase tracking-widest h-9"
-                >
-                  <RefreshCw className="w-3 h-3 mr-2" /> Reset Defaults
-                </Button>
-                <Button 
-                  variant={isAutopilotActive ? "destructive" : "default"}
-                  size="sm"
-                  onClick={() => setIsAutopilotActive(!isAutopilotActive)}
-                  className={`text-[10px] font-mono uppercase tracking-widest px-6 h-9 ${!isAutopilotActive ? 'bg-orange-600 hover:bg-orange-500 border-none' : ''}`}
-                >
-                  {isAutopilotActive ? (
-                    <><RefreshCw className="w-4 h-4 mr-2 animate-spin" /> Stop Autopilot</>
-                  ) : (
-                    <><Sparkles className="w-4 h-4 mr-2" /> Start Autopilot</>
-                  )}
-                </Button>
+            <div className="bg-[#1C1D21] border border-[#FFFFFF10] rounded-xl p-5 shadow-lg">
+              <div className="flex flex-row items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-orange-500 animate-pulse" />
+                    <h3 className="text-xs font-bold tracking-wider text-orange-400 uppercase font-mono">Autopilot Control</h3>
+                  </div>
+                  <p className="text-[10px] text-[#8E9299]">Kontrol otomatisasi sinkronisasi spreadsheet</p>
+                </div>
+                
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <Button 
+                    variant="ghost" 
+                    size="sm" 
+                    onClick={() => {
+                      setCourier(DEFAULT_COURIER);
+                      setRecipient(DEFAULT_RECIPIENT);
+                      setEnv(DEFAULT_ENV);
+                    }}
+                    className="text-[#8E9299] hover:text-white hover:bg-[#FFFFFF08] text-[9px] font-mono uppercase tracking-widest h-8 px-2.5 rounded-md"
+                  >
+                    <RefreshCw className="w-3 h-3 mr-1" /> Reset
+                  </Button>
+                  <Button 
+                    variant={isAutopilotActive ? "destructive" : "default"}
+                    size="sm"
+                    onClick={() => setIsAutopilotActive(!isAutopilotActive)}
+                    className={`text-[9px] font-mono uppercase tracking-widest px-3.5 h-8 rounded-md transition-colors ${
+                      !isAutopilotActive 
+                        ? 'bg-orange-600 hover:bg-orange-500 text-white font-bold border-none shadow-[0_0_15px_rgba(234,88,12,0.2)]' 
+                        : 'bg-red-600 hover:bg-red-500 text-white font-bold'
+                    }`}
+                  >
+                    {isAutopilotActive ? (
+                      <span className="flex items-center gap-1">
+                        <RefreshCw className="w-3 h-3 animate-spin" /> Stop
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1">
+                        <Sparkles className="w-3" /> Start
+                      </span>
+                    )}
+                  </Button>
+                </div>
               </div>
             </div>
-
-            <div className="grid grid-cols-1 gap-2">
-              <div className="flex gap-2">
-                <Input 
-                  placeholder="Apps Script URL (dengan /exec)" 
-                  value={gasUrl}
-                  onChange={(e) => setGasUrl(e.target.value)}
-                  className="h-10 text-xs bg-black/40 border-orange-500/30 text-orange-200 placeholder:text-orange-900 focus-visible:ring-orange-500"
-                />
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    const code = `function doGet(e) {
-  const p = e.parameter;
-  const action = p.action;
-  const sheetName = "Series";
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(sheetName);
-  
-  if (!sheet) {
-    return ContentService.createTextOutput(JSON.stringify({ error: "Sheet " + sheetName + " tidak ditemukan" }))
-      .setMimeType(ContentService.MimeType.JSON);
-  }
-  
-  if (action === "getQueue") {
-    const data = sheet.getDataRange().getValues();
-    for (let i = 1; i < data.length; i++) {
-      if (data[i][29] === "Queue") {
-        const row = data[i];
-        return ContentService.createTextOutput(JSON.stringify({
-          rowIndex: i + 1,
-          courier: { name: row[1], type: row[2], visual: row[3], personality: row[4], traits: row[5], characteristic: row[6], vibe: row[7], outfit: row[8], vehicle: row[9] },
-          recipient: { name: row[12], type: row[13], visual: row[14], personality: row[15], traits: row[16], characteristic: row[17], vibe: row[18], outfit: row[19], location: row[20], package: row[21], reaction: row[22] },
-          world: { weather: row[25], atmosphere: row[26], tone: row[27] }
-        })).setMimeType(ContentService.MimeType.JSON);
-      }
-    }
-    return ContentService.createTextOutput(JSON.stringify({ message: "Empty" })).setMimeType(ContentService.MimeType.JSON);
-  }
-  
-  if (action === "updateStatus") {
-    const row = Number(p.rowIndex);
-    const status = p.status;
-    if (row && status) {
-      sheet.getRange(row, 30).setValue(status);
-      SpreadsheetApp.flush();
-      return ContentService.createTextOutput("Status Updated: " + status).setMimeType(ContentService.MimeType.TEXT);
-    }
-  }
-
-  // Handle updateResults in doGet as well (as fallback)
-  if (action === "updateResults") {
-    return handleUpdateResults(sheet, p);
-  }
-
-  return ContentService.createTextOutput("Action unknown").setMimeType(ContentService.MimeType.TEXT);
-}
-
-function doPost(e) {
-  const p = e.parameter;
-  const action = p.action;
-  const sheetName = "Series";
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
-  if (!sheet) return ContentService.createTextOutput("Error: Sheet not found");
-
-  if (action === "updateResults") {
-    return handleUpdateResults(sheet, p);
-  }
-  return ContentService.createTextOutput("POST Action unknown: " + action).setMimeType(ContentService.MimeType.TEXT);
-}
-
-function handleUpdateResults(sheet, p) {
-  const row = Number(p.rowIndex);
-  if (!row) return ContentService.createTextOutput("Error: No RowIndex");
-  
-  sheet.getRange(row, 30).setValue("Finished"); // Column AD
-  sheet.getRange(row, 33).setValue(p.fullPrompt || ""); // Column AG
-  sheet.getRange(row, 34).setValue(p.facebook || ""); // Column AH
-  sheet.getRange(row, 37).setValue(p.ytTitle || ""); // Column AK
-  sheet.getRange(row, 38).setValue(p.ytDesc || ""); // Column AL
-  sheet.getRange(row, 39).setValue(p.ytHashtags || ""); // Column AM
-  sheet.getRange(row, 40).setValue(p.tiktok || ""); // Column AN
-  SpreadsheetApp.flush();
-  return ContentService.createTextOutput("Results Updated").setMimeType(ContentService.MimeType.TEXT);
-}
-
-// INSTRUKSI PENTING:
-// 1. Paste kode ini ke Apps Script.
-// 2. Simpan project (Ctrl+S).
-// 3. Klik 'Deploy' -> 'New Deployment'.
-// 4. Pilih tipe: 'Web App'.
-// 5. Deskripsi bebas (misal: 'V5').
-// 6. Execute as: 'Me' (Saya).
-// 7. Who has access: 'Anyone' (SIAPA SAJA).
-// 8. Klik 'Deploy', lalu salin URL Web App yang muncul (ujungnya /exec).
-// 9. RE-DEPLOY SETIAP KALI UPDATE KODE! (Pilih 'New Deployment' lagi)
-// 10. Izinkan Script (Allow) saat pertama kali deploy.`;
-                    navigator.clipboard.writeText(code);
-                    setGasCopied(true);
-                    setTimeout(() => setGasCopied(false), 3000);
-                  }}
-                  className="h-10 text-[10px] border-orange-500/20 text-orange-500 hover:bg-orange-500/10 shrink-0"
-                >
-                  {gasCopied ? <Check className="w-4 h-4 mr-2" /> : <Copy className="w-4 h-4 mr-2" />}
-                  {gasCopied ? "Berhasil Disalin" : "Ambil Kode"}
-                </Button>
-              </div>
 
               {isAutopilotActive && (
                 <div className="bg-orange-600/5 border border-orange-500/20 rounded-xl p-5 space-y-4">
@@ -1164,7 +1092,6 @@ function handleUpdateResults(sheet, p) {
               )}
             </div>
           </div>
-        </div>
 
         {/* Right Column: Output */}
         <div className="lg:col-span-7">
